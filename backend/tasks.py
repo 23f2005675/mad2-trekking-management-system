@@ -180,7 +180,7 @@ def generate_monthly_report():
     except Exception as e:
         logger.error(f"Failed to write local copy of monthly report: {e}")
 
-    admin_email = "admin@trek.com"
+    admin_email = "chinmaymetha.work@gmail.com"
     email_subject = "Monthly Trekking Report"
     email_body = f"""Hello Admin,
 

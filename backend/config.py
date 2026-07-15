@@ -23,11 +23,17 @@ class Config:
 
     JSON_SORT_KEYS = False
 
-    # SMTP Configuration
-    SMTP_SERVER = os.environ.get("SMTP_SERVER", "localhost")
-    SMTP_PORT = int(os.environ.get("SMTP_PORT", 1025))
-    SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
-    SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-    SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "False").lower() in ("true", "1", "yes")
-    SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "False").lower() in ("true", "1", "yes")
-    MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", "noreply@trek.com")
+    # ---------------- SMTP Configuration ---------------- #
+
+    SMTP_SERVER = "smtp.gmail.com"
+    SMTP_PORT = 587
+
+    SMTP_USERNAME = "chinmay.metha@gmail.com"
+
+    # Paste the 16-character Gmail App Password here
+    SMTP_PASSWORD = "zalx dcfz eifi pehc"
+
+    SMTP_USE_TLS = True
+    SMTP_USE_SSL = False
+
+    MAIL_DEFAULT_SENDER = SMTP_USERNAME
