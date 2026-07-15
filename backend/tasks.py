@@ -1,20 +1,21 @@
 import csv
 import io
 import os
+import logging
 from datetime import datetime, timedelta
 
 from celery import Celery
 from celery.schedules import crontab
+from flask import current_app
 
 from config import Config
 
-celery = Celery(
-    "trekking_tasks",
-    broker=Config.CELERY_BROKER_URL,
-    backend=Config.CELERY_RESULT_BACKEND
-)
+logger = logging.getLogger(__name__)
 
-# Scheduled Tasks
+# Initialize the global Celery instance (configuration will be loaded in init_celery)
+celery = Celery("trekking_tasks")
+
+# Define the scheduled beat tasks on the celery instance
 celery.conf.beat_schedule = {
     "daily-reminder": {
         "task": "tasks.send_daily_reminders",
@@ -29,10 +30,14 @@ celery.conf.beat_schedule = {
 
 def init_celery(app):
     """
-    Attach Flask application context to Celery.
+    Configure Celery using Flask application configuration and attach Flask application context.
     """
-
-    celery.conf.update(app.config)
+    celery.conf.update(
+        broker_url=app.config.get("CELERY_BROKER_URL"),
+        result_backend=app.config.get("CELERY_RESULT_BACKEND"),
+        timezone=app.config.get("CELERY_TIMEZONE", "UTC"),
+        beat_schedule=celery.conf.beat_schedule,
+    )
 
     class ContextTask(celery.Task):
         def __call__(self, *args, **kwargs):
@@ -40,7 +45,6 @@ def init_celery(app):
                 return self.run(*args, **kwargs)
 
     celery.Task = ContextTask
-
     return celery
 
 
@@ -50,8 +54,8 @@ def init_celery(app):
 
 @celery.task(name="tasks.send_daily_reminders")
 def send_daily_reminders():
-
     from models import Booking
+    from mailer import send_email
 
     tomorrow = datetime.utcnow().date() + timedelta(days=1)
 
@@ -59,20 +63,54 @@ def send_daily_reminders():
         status="Booked"
     ).all()
 
-    reminder_count = 0
+    success_count = 0
+    failure_count = 0
 
     for booking in bookings:
-
         if booking.trek and booking.trek.start_date == tomorrow:
+            user = booking.user
+            trek = booking.trek
 
-            print(
-                f"[REMINDER] {booking.user.name} "
-                f"- Trek '{booking.trek.name}' starts tomorrow."
-            )
+            if not user or not user.email:
+                logger.warning(f"Booking {booking.id} has no valid user or email address.")
+                continue
 
-            reminder_count += 1
+            subject = "Trek Reminder - Your Trek Starts Tomorrow"
+            body = f"""Hello {user.name},
 
-    return f"Sent {reminder_count} reminder(s)."
+This is a reminder that your trek:
+
+{trek.name}
+
+starts tomorrow.
+
+Location:
+{trek.location}
+
+Start Date:
+{trek.start_date}
+
+Please report on time and carry all required trekking equipment.
+
+Have a safe and enjoyable trek!
+
+Regards,
+Trekking Management Team"""
+
+            try:
+                # Actually send the email using SMTP configuration
+                sent = send_email(user.email, subject, body)
+                if sent:
+                    success_count += 1
+                    logger.info(f"Successfully sent daily trek reminder email to {user.email} (Booking ID: {booking.id})")
+                else:
+                    failure_count += 1
+                    logger.error(f"Failed to send daily trek reminder email to {user.email} (Booking ID: {booking.id})")
+            except Exception as e:
+                failure_count += 1
+                logger.error(f"Error while sending daily trek reminder email to {user.email}: {e}")
+
+    return f"Sent {success_count} reminder(s) successfully, failed {failure_count} reminder(s)."
 
 
 # ---------------------------------------------------------
@@ -81,42 +119,47 @@ def send_daily_reminders():
 
 @celery.task(name="tasks.generate_monthly_report")
 def generate_monthly_report():
-
     from models import Trek, Booking, User
+    from mailer import send_email
 
-    html = f"""
-    <html>
-    <head>
-        <title>Monthly Report</title>
-    </head>
+    total_users = User.query.filter_by(role="User").count()
+    total_staff = User.query.filter_by(role="Trek Staff").count()
+    total_treks = Trek.query.count()
+    total_bookings = Booking.query.count()
 
-    <body>
+    generation_date = datetime.utcnow().strftime("%d-%m-%Y %H:%M")
 
-        <h1>Trekking Management System</h1>
+    html = f"""<html>
+<head>
+    <title>Monthly Report</title>
+</head>
 
-        <h2>Monthly Report</h2>
+<body>
 
-        <p>
-            Generated On :
-            {datetime.utcnow().strftime("%d-%m-%Y %H:%M")}
-        </p>
+    <h1>Trekking Management System</h1>
 
-        <hr>
+    <h2>Monthly Report</h2>
 
-        <ul>
-            <li>Total Users : {User.query.filter_by(role="User").count()}</li>
-            <li>Total Staff : {User.query.filter_by(role="Trek Staff").count()}</li>
-            <li>Total Treks : {Trek.query.count()}</li>
-            <li>Total Bookings : {Booking.query.count()}</li>
-        </ul>
+    <p>
+        Generated On :
+        {generation_date}
+    </p>
 
-    </body>
-    </html>
-    """
+    <hr>
+
+    <ul>
+        <li>Total Users : {total_users}</li>
+        <li>Total Staff : {total_staff}</li>
+        <li>Total Treks : {total_treks}</li>
+        <li>Total Bookings : {total_bookings}</li>
+    </ul>
+
+</body>
+</html>
+"""
 
     reports_dir = os.path.join(
-        os.path.dirname(__file__),
-        "instance",
+        current_app.instance_path,
         "reports"
     )
 
@@ -130,8 +173,42 @@ def generate_monthly_report():
 
     filepath = os.path.join(reports_dir, filename)
 
-    with open(filepath, "w", encoding="utf-8") as file:
-        file.write(html)
+    try:
+        with open(filepath, "w", encoding="utf-8") as file:
+            file.write(html)
+        logger.info(f"Successfully generated and saved local monthly report at {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to write local copy of monthly report: {e}")
+
+    admin_email = "admin@trek.com"
+    email_subject = "Monthly Trekking Report"
+    email_body = f"""Hello Admin,
+
+Please find attached the Monthly Trekking Report for the Trekking Management System.
+
+Report Details:
+- Generated On: {generation_date}
+- Total Users: {total_users}
+- Total Staff: {total_staff}
+- Total Treks: {total_treks}
+- Total Bookings: {total_bookings}
+
+Regards,
+Trekking Management Team"""
+
+    try:
+        sent = send_email(
+            to_email=admin_email,
+            subject=email_subject,
+            body=email_body,
+            attachment_path=filepath
+        )
+        if sent:
+            logger.info(f"Successfully emailed monthly report to {admin_email}")
+        else:
+            logger.error(f"Failed to email monthly report to {admin_email}")
+    except Exception as e:
+        logger.error(f"Error while emailing monthly report to {admin_email}: {e}")
 
     return filepath
 
@@ -142,7 +219,6 @@ def generate_monthly_report():
 
 @celery.task(name="tasks.export_booking_history_task")
 def export_booking_history_task(user_id):
-
     from models import Booking
 
     bookings = Booking.query.filter_by(
@@ -162,18 +238,16 @@ def export_booking_history_task(user_id):
     ])
 
     for booking in bookings:
-
         writer.writerow([
             booking.id,
-            booking.trek.name,
+            booking.trek.name if booking.trek else None,
             booking.booking_date,
             booking.status,
             booking.payment_status
         ])
 
     export_dir = os.path.join(
-        os.path.dirname(__file__),
-        "instance",
+        current_app.instance_path,
         "exports"
     )
 
